@@ -22,7 +22,7 @@
   "homepage": "https://github.com/commontoolsinc/labs#readme",
   "devDependencies": {
     "typescript": "^5.2.2",
-    "vite": "^5.3.1",
+    "vite": "^5.3.6",
     "wireit": "^0.14.4"
   },
   "wireit": {
