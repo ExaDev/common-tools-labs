@@ -1,10 +1,9 @@
 import { CellImpl, CellReference, ReactivityLog } from "./cell.js";
 import { compactifyPaths, pathAffected } from "./utils.js";
+import { type Cancel } from "./cancel.js";
 
 export type Action = (log: ReactivityLog) => any;
 export type EventHandler = (event: any) => any;
-
-type Cancel = () => void;
 
 const pending = new Set<Action>();
 const eventQueue: (() => void)[] = [];
@@ -15,15 +14,19 @@ const cancels = new WeakMap<Action, Cancel[]>();
 const idlePromises: (() => void)[] = [];
 let loopCounter = new WeakMap<Action, number>();
 const errorHandlers = new Set<(error: Error) => void>();
+let running: Promise<void> | undefined = undefined;
+let scheduled = false;
 
 const MAX_ITERATIONS_PER_RUN = 100;
 
-export function schedule(action: Action, log: ReactivityLog) {
+export function schedule(action: Action, log: ReactivityLog): Cancel {
   setDependencies(action, log);
   log.reads.forEach(({ cell }) => dirty.add(cell));
 
   queueExecution();
   pending.add(action);
+
+  return () => unschedule(action);
 }
 
 export function unschedule(fn: Action): void {
@@ -33,10 +36,18 @@ export function unschedule(fn: Action): void {
 }
 
 // Like schedule, but runs the action immediately to gather dependencies
-export function run(action: Action): any {
+export async function run(action: Action): Promise<any> {
   const log: ReactivityLog = { reads: [], writes: [] };
 
-  const result = action(log);
+  if (running) await running;
+
+  running = new Promise(async (resolve) => {
+    const result = await action(log);
+    running = undefined;
+    resolve(result);
+  });
+
+  const result = await running;
 
   // Note: By adding the listeners after the call we avoid triggering a re-run
   // of the action if it changed a r/w cell. Note that this also means that
@@ -77,10 +88,7 @@ export function queueEvent(eventRef: CellReference, event: any) {
       ref.path.every((p, i) => p === eventRef.path[i])
     ) {
       queueExecution();
-      eventQueue.push(() => {
-        const nextEvent = handler(event);
-        if (nextEvent) queueEvent(ref, nextEvent);
-      });
+      eventQueue.push(() => handler(event));
     }
   }
 }
@@ -88,16 +96,20 @@ export function queueEvent(eventRef: CellReference, event: any) {
 export function addEventHandler(
   handler: EventHandler,
   ref: CellReference
-): () => void {
+): Cancel {
   eventHandlers.push([ref, handler]);
   return () => {
-    const index = eventHandlers.findIndex(([r, _]) => r === ref);
+    const index = eventHandlers.findIndex(
+      ([r, h]) => r === ref && h === handler
+    );
     if (index !== -1) eventHandlers.splice(index, 1);
   };
 }
 
 function queueExecution() {
-  if (pending.size === 0 && eventQueue.length === 0) queueMicrotask(execute);
+  if (scheduled) return;
+  queueMicrotask(execute);
+  scheduled = true;
 }
 
 function setDependencies(action: Action, log: ReactivityLog) {
@@ -112,7 +124,10 @@ function handleError(error: Error) {
   for (const handler of errorHandlers) handler(error);
 }
 
-function execute() {
+async function execute() {
+  // In case a directly invoked `run` is still running, wait for it to finish.
+  if (running) await running;
+
   // Process next event from the event queue. Will mark more cells as dirty.
   eventQueue.shift()?.();
 
@@ -130,7 +145,7 @@ function execute() {
     loopCounter.set(fn, (loopCounter.get(fn) || 0) + 1);
     if (loopCounter.get(fn)! > MAX_ITERATIONS_PER_RUN)
       handleError(new Error("Too many iterations"));
-    else run(fn);
+    else await run(fn);
   }
 
   if (pending.size === 0 && eventQueue.length === 0) {
@@ -139,6 +154,8 @@ function execute() {
     idlePromises.length = 0;
 
     loopCounter = new WeakMap();
+
+    scheduled = false;
   } else {
     queueMicrotask(execute);
   }
@@ -157,7 +174,11 @@ function topologicalSort(
   for (const action of actions) {
     const { reads } = dependencies.get(action)!;
     // TODO: Keep track of affected paths
-    if (Array.from(reads).some(({ cell }) => dirty.has(cell))) {
+    if (reads.length === 0) {
+      // Actions with no dependencies are always relevant. Note that they must
+      // be manually added to `pending`, which happens only once on `schedule`.
+      relevantActions.add(action);
+    } else if (reads.some(({ cell }) => dirty.has(cell))) {
       relevantActions.add(action);
     }
   }
@@ -220,6 +241,7 @@ function topologicalSort(
   const result: Action[] = [];
   const visited = new Set<Action>();
 
+  // Add all actions with no dependencies (in-degree 0) to the queue
   for (const [action, degree] of inDegree.entries()) {
     if (degree === 0) {
       queue.push(action);

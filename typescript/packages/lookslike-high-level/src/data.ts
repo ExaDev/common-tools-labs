@@ -1,12 +1,14 @@
 // This file is setting up example data
 
-import { ID, TYPE, NAME, UI, Recipe } from "@commontools/common-builder";
+import { TYPE, NAME, UI, Recipe } from "@commontools/common-builder";
 import {
   run,
   cell,
-  isCell,
+  getEntityId,
   CellImpl,
-  getCellReferenceOrValue,
+  raw,
+  addModuleByRef,
+  type ReactivityLog,
 } from "@commontools/common-runner";
 
 import { todoList } from "./recipes/todo-list.js";
@@ -16,45 +18,37 @@ import { ticket } from "./recipes/ticket.js";
 import { routine } from "./recipes/routine.js";
 import { fetchExample } from "./recipes/fetchExample.js";
 import { counter } from "./recipes/counter.js";
+import { counters } from "./recipes/counters.js";
 
 // Necessary, so that suggestions are indexed.
 import "./recipes/todo-list-as-task.js";
 import "./recipes/playlist.js";
-import {
-  getCellReferenceOrThrow,
-  isCellProxyForDereferencing,
-} from "@commontools/common-runner";
-import { fetchCollections } from "./recipes/fetchCollections.js";
-import { iframe} from "./recipes/iframe.js";
+import { iframe } from "./recipes/iframe.js";
+import { queryCollections } from "./recipes/queryCollections.js";
 import { importCalendar } from "./recipes/importCalendar.js";
 import { dungeon } from "./recipes/dungeon.js";
 import { dataDesigner } from "./recipes/dataDesigner.js";
 import { jsonImporter } from "./recipes/jsonImport.js";
 import { prompt } from "./recipes/prompts.js";
 import { wiki } from "./recipes/wiki.js";
+import { helloIsolated } from "./recipes/helloIsolated.js";
 
 export type Charm = {
-  [ID]: number;
   [NAME]?: string;
   [UI]?: any;
   [TYPE]?: string;
   [key: string]: any;
 };
 
-export { ID, TYPE, NAME, UI };
-
-// TODO: TYPE is now obsolete. Do we still need this?
-export function isCharm(value: any): value is Charm {
-  return isCell(value) && ID in value.get() && TYPE in value.get();
-}
+export { TYPE, NAME, UI };
 
 export const charms = cell<CellImpl<Charm>[]>([]);
 
 export function addCharms(newCharms: CellImpl<any>[]) {
   const currentCharms = charms.get();
-  const currentIds = new Set(currentCharms.map((charm) => charm.get()[ID]));
+  const currentIds = new Set(currentCharms.map((charm) => charm.entityId));
   const charmsToAdd = newCharms.filter(
-    (charm) => !currentIds.has(charm.get()[ID])
+    (charm) => !currentIds.has(charm.entityId)
   );
 
   if (charmsToAdd.length > 0) {
@@ -63,10 +57,14 @@ export function addCharms(newCharms: CellImpl<any>[]) {
 }
 
 addCharms([
-  run(iframe, { title: "two way binding counter", prompt: "counter", data: { counter: 0 } }),
+  run(iframe, {
+    title: "two way binding counter",
+    prompt: "counter",
+    data: { counter: 0 },
+  }),
   run(importCalendar, {}),
-  run(fetchCollections, {
-    url: "/api/data/collections/"
+  run(queryCollections, {
+    url: "/api/data/",
   }),
   run(todoList, {
     title: "My TODOs",
@@ -93,54 +91,73 @@ addCharms([
     // TODO: A lot more missing here, this is just to drive the suggestion.
     locations: ["coffee shop with great baristas"],
   }),
+  run(counters, {}),
 ]);
 
 export type RecipeManifest = {
   name: string;
-  recipe: Recipe;
+  recipeId: string;
 };
+
+// TODO: Make this a map of hashes that get persisted
+export const recipeById = new Map<string, Recipe>();
+
+let unknownCounter = 0;
+function addRecipe(recipe: Recipe) {
+  const id =
+    (recipe.schema as { description: string })?.description ??
+    `unknown-${unknownCounter++}`;
+
+  recipeById.set(id, recipe);
+
+  return id;
+}
 
 export const recipes: RecipeManifest[] = [
   {
     name: "Explore dungeon game",
-    recipe: dungeon,
+    recipeId: addRecipe(dungeon),
   },
   {
     name: "Create a new TODO list",
-    recipe: todoList,
+    recipeId: addRecipe(todoList),
   },
   {
     name: "Find places",
-    recipe: localSearch,
+    recipeId: addRecipe(localSearch),
   },
   {
     name: "Find a LuftBnB place to stay",
-    recipe: luftBnBSearch,
+    recipeId: addRecipe(luftBnBSearch),
   },
   {
     name: "JSON Importer",
-    recipe: jsonImporter,
+    recipeId: addRecipe(jsonImporter),
   },
   {
     name: "Data Designer",
-    recipe: dataDesigner,
+    recipeId: addRecipe(dataDesigner),
   },
   {
     name: "Create a counter",
-    recipe: counter,
+    recipeId: addRecipe(counter),
   },
   {
     name: "Fetch JSON from a URL",
-    recipe: fetchExample,
+    recipeId: addRecipe(fetchExample),
   },
   {
     name: "Explore imagery prompts",
-    recipe: prompt,
+    recipeId: addRecipe(prompt),
   },
   {
     name: "Explore Halucinated wiki",
-    recipe: wiki,
-  }
+    recipeId: addRecipe(wiki),
+  },
+  {
+    name: "Hello Isolated",
+    recipeId: addRecipe(helloIsolated),
+  },
 ];
 
 // Helper for mock data
@@ -166,30 +183,20 @@ function getFridayAndMondayDateStrings() {
 }
 
 // Terrible hack to open a charm from a recipe
-let openCharmOpener: (charmId: number) => void = () => {};
-export const openCharm = (charmId: number) => openCharmOpener(charmId);
-openCharm.set = (opener: (charmId: number) => void) => {
+let openCharmOpener: (charmId: string) => void = () => {};
+export const openCharm = (charmId: string) => openCharmOpener(charmId);
+openCharm.set = (opener: (charmId: string) => void) => {
   openCharmOpener = opener;
 };
 
-export function launch(recipe: Recipe, bindings: any) {
-  if (isCellProxyForDereferencing(bindings)) {
-    const { cell, path } = getCellReferenceOrThrow(bindings);
-    const keys = Object.keys(bindings);
-    bindings = Object.fromEntries(
-      keys.map((key) => [key, { cell, path: [...path, key] }])
-    );
-  } else {
-    bindings = Object.fromEntries(
-      Object.entries(bindings).map(([key, value]) => [
-        key,
-        getCellReferenceOrValue(value),
-      ])
-    );
-  }
-  const charm = run(recipe, bindings);
-  openCharm(charm.get()[ID]);
-}
+addModuleByRef(
+  "navigateTo",
+  raw((inputsCell: CellImpl<any>) => (log: ReactivityLog) => {
+    // HACK to follow the cell references to the entityId
+    const entityId = getEntityId(inputsCell.getAsProxy([], log));
+    if (entityId) openCharm(entityId);
+  })
+);
 
 (window as any).recipes = recipes;
 (window as any).charms = charms;

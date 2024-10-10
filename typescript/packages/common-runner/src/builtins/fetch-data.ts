@@ -1,27 +1,25 @@
-import { type Node } from "@commontools/common-builder";
 import { cell, CellImpl, ReactivityLog } from "../cell.js";
-import { sendValueToBinding, findAllAliasedCells } from "../utils.js";
-import { schedule, Action } from "../scheduler.js";
-import { mapBindingsToCell } from "../utils.js";
-
+import { normalizeToCells } from "../utils.js";
+import { type Action } from "../scheduler.js";
 /**
  * Fetch data from a URL.
  *
  * Returns the fetched result as `result`. `pending` is true while a request is pending.
  *
  * @param url - A cell containing the URL to fetch data from.
+ * @param mode - The mode to use for fetching data. Either `text` or `json`
+ *   default to `json` results.
  * @returns { pending: boolean, result: any, error: any } - As individual cells, representing `pending` state, final `result`, and any `error`.
  */
 export function fetchData(
-  recipeCell: CellImpl<any>,
-  { inputs, outputs }: Node
-) {
-  const inputBindings = mapBindingsToCell(inputs, recipeCell) as {
+  inputsCell: CellImpl<{
     url: string;
+    mode?: "text" | "json";
+    options?: { body?: any; method?: string; headers?: Record<string, string> };
     result?: any;
-  };
-  const inputsCell = cell(inputBindings);
-
+  }>,
+  sendResult: (result: any) => void
+): Action {
   const pending = cell(false);
   const result = cell<any | undefined>(undefined);
   const error = cell<any | undefined>(undefined);
@@ -32,13 +30,16 @@ export function fetchData(
     error,
   });
 
-  const outputBindings = mapBindingsToCell(outputs, recipeCell) as any[];
-  sendValueToBinding(recipeCell, outputBindings, resultCell);
+  sendResult(resultCell);
 
   let currentRun = 0;
 
-  const startFetch: Action = (log: ReactivityLog) => {
-    const { url } = inputsCell.getAsProxy([], log);
+  return (log: ReactivityLog) => {
+    const { url, mode, options } = inputsCell.getAsProxy([], log);
+    const processResponse =
+      (mode || "json") === "json"
+        ? (r: Response) => r.json()
+        : (r: Response) => r.text();
 
     if (url === undefined) {
       pending.setAtPath([], false, log);
@@ -54,10 +55,12 @@ export function fetchData(
 
     const thisRun = ++currentRun;
 
-    fetch(url)
-      .then((response) => response.json())
+    fetch(url, options)
+      .then(processResponse)
       .then((data) => {
         if (thisRun !== currentRun) return;
+
+        normalizeToCells(result, undefined, log);
 
         pending.setAtPath([], false, log);
         result.setAtPath([], data, log);
@@ -69,9 +72,4 @@ export function fetchData(
         error.setAtPath([], err, log);
       });
   };
-
-  schedule(startFetch, {
-    reads: findAllAliasedCells(inputBindings, recipeCell),
-    writes: findAllAliasedCells(outputBindings, recipeCell),
-  });
 }

@@ -3,10 +3,15 @@ import { customElement, property } from "lit/decorators.js";
 import { ref, createRef, Ref } from "lit/directives/ref.js";
 import { style } from "@commontools/common-ui";
 import { render } from "@commontools/common-html";
-import { Charm, ID, UI, NAME, addCharms, launch } from "../data.js";
-import { CellImpl, isCell, charmById } from "@commontools/common-runner";
+import { Charm, UI, NAME, addCharms } from "../data.js";
+import {
+  run,
+  CellImpl,
+  isCell,
+  getCellByEntityId,
+} from "@commontools/common-runner";
 import { repeat } from "lit/directives/repeat.js";
-import { iframe} from "../recipes/iframe.js";
+import { iframe } from "../recipes/iframe.js";
 
 @customElement("common-window-manager")
 export class CommonWindowManager extends LitElement {
@@ -80,44 +85,51 @@ export class CommonWindowManager extends LitElement {
   @property({ type: Array })
   charms: CellImpl<Charm>[] = [];
 
-
-  private charmRefs: Map<number, Ref<HTMLElement>> = new Map();
+  private charmRefs: Map<string, Ref<HTMLElement>> = new Map();
   private newCharmRefs: [CellImpl<Charm>, Ref<HTMLElement>][] = [];
 
   handleUniboxSubmit(event: CustomEvent, charm: CellImpl<Charm>) {
     const value = event.detail.value;
     const shiftHeld = event.detail.shiftHeld;
-    console.log('Unibox submitted:', value);
+    console.log("Unibox submitted:", value);
 
     if (shiftHeld) {
-      charm.asSimpleCell(["addToPrompt"]).send({ prompt: value } as any)
+      charm.asSimpleCell(["addToPrompt"]).send({ prompt: value } as any);
     } else {
-      const charmValues = charm.getAsProxy()
-      let fieldsToInclude = Object.entries(charmValues).reduce((acc, [key, value]) => {
-        if (!key.startsWith('$') && !key.startsWith('_')) {
-          acc[key] = value;
-        }
-        return acc;
-      }, {} as any);
+      const charmValues = charm.getAsProxy();
+      let fieldsToInclude = Object.entries(charmValues).reduce(
+        (acc, [key, value]) => {
+          if (!key.startsWith("$") && !key.startsWith("_")) {
+            acc[key] = value;
+          }
+          return acc;
+        },
+        {} as any
+      );
 
       if (charmValues.data) {
         fieldsToInclude = charmValues.data;
       }
 
-      launch(iframe, { data: fieldsToInclude, title: value, prompt: value });
+      this.openCharm(
+        run(iframe, { data: fieldsToInclude, title: value, prompt: value })
+          .entityId!
+      );
     }
   }
 
-  input: string = '';
+  input: string = "";
 
   override render() {
     return html`
       ${repeat(
         this.charms,
-        (charm) => charm.getAsProxy()[ID],
+        (charm) => charm.entityId,
         (charm) => {
           const charmValues = charm.getAsProxy();
-          const charmId = charmValues[ID];
+          const charmId = charm.entityId;
+
+          if (!charmId) throw new Error("Charm has no entity ID");
 
           // Create a new ref for this charm
           let charmRef = this.charmRefs.get(charmId);
@@ -136,7 +148,9 @@ export class CommonWindowManager extends LitElement {
                   <div slot="secondary"><common-annotation .query=${
                     charmValues[NAME] ?? ""
                   } .target=${charmId} .data=${charmValues} ></common-annotation></div>
-                  <common-unibox slot="search" value=${this.input} @submit=${(e) => this.handleUniboxSubmit(e, charm)} placeholder="" label=">">
+                  <common-unibox slot="search" value=${this.input} @submit=${(
+            e: CustomEvent
+          ) => this.handleUniboxSubmit(e, charm)} placeholder="" label=">">
                 </common-system-layout>
               </common-screen-element>
             </div>
@@ -146,8 +160,8 @@ export class CommonWindowManager extends LitElement {
     `;
   }
 
-  openCharm(charmId: number) {
-    const charm = charmById.get(charmId) as CellImpl<Charm>;
+  openCharm(charmId: string) {
+    const charm = getCellByEntityId<Charm>(charmId);
     if (!isCell(charm)) throw new Error(`Charm ${charmId} doesn't exist`);
 
     addCharms([charm]); // Make sure any shows charm is in the list of charms
@@ -171,7 +185,7 @@ export class CommonWindowManager extends LitElement {
     });
   }
 
-  private scrollToAndHighlight(charmId: number, animate: boolean) {
+  private scrollToAndHighlight(charmId: string, animate: boolean) {
     const window = this.renderRoot.querySelector(`#window-${charmId}`);
     if (window) {
       window.scrollIntoView({
@@ -189,10 +203,8 @@ export class CommonWindowManager extends LitElement {
   onClose(e: Event) {
     const windowElement = (e.currentTarget as HTMLElement).closest(".window");
     if (windowElement) {
-      const charmId = parseInt(windowElement.id.replace("window-", ""), 10);
-      this.charms = this.charms.filter(
-        (charm) => charm.getAsProxy()[ID] !== charmId
-      );
+      const charmId = windowElement.id.replace("window-", "");
+      this.charms = this.charms.filter((charm) => charm.entityId !== charmId);
       this.charmRefs.delete(charmId);
     }
   }

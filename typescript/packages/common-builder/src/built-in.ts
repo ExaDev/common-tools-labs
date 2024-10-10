@@ -1,37 +1,57 @@
 import { lift, createNodeFactory } from "./module.js";
 import { Value, NodeFactory, CellProxy } from "./types.js";
 
-export function generateData<T>(
+export function llm(
   params: Value<{
-    prompt: string;
-    result?: T;
-    schema?: any;
+    messages?: string[];
+    prompt?: string;
     system?: string;
-    mode?: "json" | "html";
+    stop?: string;
+    max_tokens?: number;
   }>
-): CellProxy<{ pending: boolean; result: T; partial: any; error: any }> {
-  generateDataFactory ||= createNodeFactory({
-    type: "builtin",
-    implementation: "generateData",
+): CellProxy<{
+  pending: boolean;
+  result?: string;
+  partial?: string;
+  error: any;
+}> {
+  llmFactory ||= createNodeFactory({
+    type: "ref",
+    implementation: "llm",
   });
-  return generateDataFactory(params);
+  return llmFactory(params);
 }
 
 export function fetchData<T>(
+  params: Value<{
+    url: string;
+    mode?: "json" | "text";
+    options?: RequestInit;
+    result?: T;
+  }>
+): Value<{ pending: boolean; result: T; error: any }> {
+  fetchDataFactory ||= createNodeFactory({
+    type: "ref",
+    implementation: "fetchData",
+  });
+  return fetchDataFactory(params);
+}
+
+export function streamData<T>(
   params: Value<{
     url: string;
     options?: RequestInit;
     result?: T;
   }>
 ): Value<{ pending: boolean; result: T; error: any }> {
-  fetchDataFactory ||= createNodeFactory({
-    type: "builtin",
-    implementation: "fetchData",
+  streamDataFactory ||= createNodeFactory({
+    type: "ref",
+    implementation: "streamData",
   });
-  return fetchDataFactory(params);
+  return streamDataFactory(params);
 }
 
-let fetchDataFactory:
+let streamDataFactory:
   | NodeFactory<
       { url: string; options?: RequestInit; result?: any },
       { pending: boolean; result: any; error: any }
@@ -44,20 +64,43 @@ export function ifElse<T, U, V>(
   ifFalse: Value<V>
 ): CellProxy<T extends true ? U : V> {
   ifElseFactory ||= createNodeFactory({
-    type: "builtin",
+    type: "ref",
     implementation: "ifElse",
   });
   return ifElseFactory([condition, ifTrue, ifFalse]);
 }
 
-let ifElseFactory: NodeFactory<[any, any, any], any> | undefined = undefined;
+export function navigateTo(cell: CellProxy<any>): CellProxy<string> {
+  navigateToFactory ||= createNodeFactory({
+    type: "ref",
+    implementation: "navigateTo",
+  });
+  return navigateToFactory(cell);
+}
 
-let generateDataFactory:
+let fetchDataFactory:
   | NodeFactory<
-      { prompt: string; result?: any; schema?: any; system?: string },
-      { pending: boolean; result: any; partial: any; error: any }
+      { url: string; options?: RequestInit; result?: any },
+      { pending: boolean; result: any; error: any }
     >
-  | undefined = undefined;
+  | undefined;
+
+let ifElseFactory: NodeFactory<[any, any, any], any> | undefined;
+
+let llmFactory:
+  | NodeFactory<
+      {
+        messages?: string[];
+        prompt?: string;
+        system?: string;
+        stop?: string;
+        max_tokens?: number;
+      },
+      { pending: boolean; result?: string; partial?: string; error: any }
+    >
+  | undefined;
+
+let navigateToFactory: NodeFactory<number, undefined> | undefined;
 
 // Example:
 // str`Hello, ${name}!`

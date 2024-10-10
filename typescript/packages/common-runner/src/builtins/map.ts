@@ -1,9 +1,17 @@
-import { type Recipe, type Node } from "@commontools/common-builder";
-import { cell, CellImpl, ReactivityLog } from "../cell.js";
-import { run } from "../runner.js";
-import { sendValueToBinding, findAllAliasedCells } from "../utils.js";
-import { schedule, Action } from "../scheduler.js";
-import { mapBindingsToCell } from "../utils.js";
+import { type Recipe } from "@commontools/common-builder";
+import {
+  cell,
+  CellImpl,
+  ReactivityLog,
+  getCellReferenceOrThrow,
+  isCellReference,
+  isCell,
+  type CellReference,
+} from "../cell.js";
+import { run, cancels } from "../runner.js";
+import { isEqualCellReferences, followCellReferences } from "../utils.js";
+import { type Action } from "../scheduler.js";
+import { type AddCancel } from "../cancel.js";
 
 /**
  * Implemention of built-in map module. Unlike regular modules, this will be
@@ -26,19 +34,22 @@ import { mapBindingsToCell } from "../utils.js";
  * @param op - A recipe to apply to each value.
  * @returns A cell containing the mapped values.
  */
-export function map(recipeCell: CellImpl<any>, { inputs, outputs }: Node) {
-  const inputBindings = mapBindingsToCell(inputs, recipeCell) as {
+export function map(
+  inputsCell: CellImpl<{
     list: any[];
     op: Recipe;
-  };
-  const outputBindings = mapBindingsToCell(outputs, recipeCell) as any[];
+  }>,
+  sendResult: (result: any) => void,
+  addCancel: AddCancel
+): Action {
+  const result = cell<any[]>([]);
+  let sourceRefToResult: { ref: CellReference; resultCell: CellImpl<any> }[] =
+    [];
 
-  const inputsCell = cell(inputBindings);
-  const result = cell<any[] | undefined>(undefined);
-  const valueToResult: Map<any, CellImpl<any>> = new Map();
+  sendResult(result);
 
-  const mapValuesToOp: Action = (log: ReactivityLog) => {
-    const { list, op } = inputsCell.getAsProxy([], log);
+  return (log: ReactivityLog) => {
+    let { list, op } = inputsCell.getAsProxy([], log);
 
     // If the list is undefined it means the input isn't available yet.
     // Correspondingly, the result should be []. TODO: Maybe it's important to
@@ -51,46 +62,66 @@ export function map(recipeCell: CellImpl<any>, { inputs, outputs }: Node) {
     if (!Array.isArray(list))
       throw new Error("map currently only supports arrays");
 
-    let previousResult = result.getAsProxy([]);
-    if (!Array.isArray(previousResult)) {
-      result.setAtPath([], [], log);
-      previousResult = [];
-    }
+    // Hack to get to underlying array that lists cell references, etc.
+    const listRef = getCellReferenceOrThrow(list);
+    list = listRef.cell.getAtPath(listRef.path);
 
-    const seen = new Set<any>();
+    const seen: any[] = [];
 
     // Update values that are new or have changed
     for (let index = 0; index < list.length; index++) {
-      const value = list[index];
+      let value = list[index];
 
-      if (previousResult[index] === value) return;
+      // We have to manually add read logs, as we don't go via the proxy here.
+      log?.reads.push({ cell: listRef.cell, path: [...listRef.path, index] });
+
+      if (value === undefined) {
+        result.setAtPath([index], undefined, log);
+        continue;
+      }
+
+      if (isCell(value)) value = { cell: value, path: [] };
+      if (!isCellReference(value))
+        throw new Error("map requires all values to be cell references");
+
+      // TODO: Replace with something that follows aliases as well.
+      value = followCellReferences(value, log);
 
       if (typeof value !== "object")
         throw new Error("map currently only supports objects");
 
       // If the value is new, instantiate the recipe and store the result cell
-      if (!valueToResult.has(value)) {
-        const resultValue = run(op, value);
-        valueToResult.set(value, resultValue);
+      let itemResult = sourceRefToResult.find(({ ref }) =>
+        isEqualCellReferences(ref, value)
+      );
+
+      if (!itemResult) {
+        if (value.cell.getAtPath(value.path) === undefined) {
+          // If value is undefined, don't yet insert the item. Add to read log,
+          // so we get invoked again once it changes.
+          log?.reads.push(value);
+          continue;
+        }
+        const resultCell = run(op, value);
+        addCancel(cancels.get(resultCell));
+        itemResult = { ref: value, resultCell };
+        sourceRefToResult.push(itemResult);
       }
 
       // Send the result value to the result cell
-      result.setAtPath([index], valueToResult.get(value), log);
-      seen.add(value);
+      result.setAtPath([index], { cell: itemResult.resultCell, path: [] }, log);
+      seen.push(value);
     }
 
-    // Remove values that are no longer in the input
-    for (const value of valueToResult.keys()) {
-      if (!seen.has(value)) {
-        valueToResult.delete(value);
-      }
-    }
+    if (result.get().length > list.length)
+      result.setAtPath(["length"], list.length, log);
 
-    sendValueToBinding(recipeCell, outputBindings, result, log);
+    // NOTE: We leave prior results in the list for now, so they reuse prior
+    // runs when items reappear
+    //
+    // Remove values that are no longer in the input sourceRefToResult =
+    // sourceRefToResult.filter(({ ref }) => seen.find((seenValue) =>
+    // isEqualCellReferences(seenValue, ref))
+    //);
   };
-
-  schedule(mapValuesToOp, {
-    reads: findAllAliasedCells(inputBindings, recipeCell),
-    writes: findAllAliasedCells(outputBindings, recipeCell),
-  });
 }

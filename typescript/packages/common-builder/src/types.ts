@@ -1,6 +1,7 @@
-// Should be Symbol("ID") or so, but this makes repeat() use these when
+import { JavaScriptModuleDefinition } from "@commontools/common-runtime";
+
+// Should be Symbol("UI") or so, but this makes repeat() use these when
 // iterating over recipes.
-export const ID = "$ID";
 export const TYPE = "$TYPE";
 export const NAME = "$NAME";
 export const UI = "$UI";
@@ -27,14 +28,17 @@ export type Value<T> =
 export type CellProxyMethods<T> = {
   get(): CellProxy<T>;
   set(value: Value<T> | T): void;
+  key<K extends keyof T>(key: K): CellProxy<T[K]>;
   setDefault(value: Value<T> | T): void;
+  setPreExisting(ref: any): void;
   connect(node: NodeProxy): void;
   export(): {
-    top: CellProxy<any>;
+    cell: CellProxy<any>;
     path: PropertyKey[];
     value?: Value<T>;
     defaultValue?: Value<T>;
     nodes: Set<NodeProxy>;
+    external?: any;
   };
   map<S>(
     fn: (value: T extends Array<infer U> ? Value<U> : Value<T>) => Value<S>
@@ -42,7 +46,9 @@ export type CellProxyMethods<T> = {
   [isCellProxyMarker]: true;
 };
 
-export function isCell(value: any): value is CellProxy<any> {
+export const isCellProxyMarker = Symbol("isCellProxy");
+
+export function isCellProxy(value: any): value is CellProxy<any> {
   return value && typeof value[isCellProxyMarker] === "boolean";
 }
 
@@ -95,18 +101,15 @@ export function isStreamAlias(value: any): value is StreamAlias {
 }
 
 export type Module = {
-  type: "javascript" | "recipe" | "builtin" | "passthrough";
-  implementation?: Function | Recipe | string;
+  type: "ref" | "javascript" | "recipe" | "raw" | "isolated" | "passthrough";
+  implementation?: Function | Recipe | JavaScriptModuleDefinition | string;
   wrapper?: "handler";
 };
 
 export function isModule(value: any): value is Module {
   return (
     (typeof value === "function" || typeof value === "object") &&
-    (value.type === "javascript" ||
-      value.type === "recipe" ||
-      value.type === "builtin" ||
-      value.type === "passthrough")
+    typeof value.type === "string"
   );
 }
 
@@ -124,7 +127,31 @@ export type Recipe = {
 };
 
 export function isRecipe(value: any): value is Recipe {
-  return !!(value && value.schema && value.nodes && Array.isArray(value.nodes));
+  return (
+    (typeof value === "function" || typeof value === "object") &&
+    value !== null &&
+    !!value.schema &&
+    !!value.nodes &&
+    Array.isArray(value.nodes)
+  );
 }
 
-export const isCellProxyMarker = Symbol("isCellProxy");
+type CanBeCellProxy = { [toCellProxy]: () => CellProxy<any> };
+
+export function canBeCellProxy(value: any): value is CanBeCellProxy {
+  return (
+    !!value &&
+    (typeof value === "object" || typeof value === "function") &&
+    typeof value[toCellProxy] === "function"
+  );
+}
+
+export function makeCellProxy(value: CanBeCellProxy): CellProxy<any> {
+  return value[toCellProxy]();
+}
+
+export const toCellProxy = Symbol("toCellProxy");
+
+export type Frame = {
+  parent?: Frame;
+};
